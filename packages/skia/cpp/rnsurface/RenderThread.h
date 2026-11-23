@@ -31,6 +31,14 @@ extern "C" void objc_autoreleasePoolPop(void *pool);
 #include <pthread.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 #include "rnsurface/ThreadChecker.h"
@@ -42,11 +50,13 @@ namespace rnsurface {
  * than by the platform (PresentThread.java and RNSkPresentThread.mm before
  * it). It owns the loop the platform's vsync needs: a CFRunLoop on Apple
  * platforms, so that a CADisplayLink can tick on it; an ALooper on Android,
- * so that AChoreographer can; a poll on an eventfd elsewhere, which is what
- * the host tests run. Tasks posted run in order, each after the ones posted
- * before it, and never on the spot, also when posted from this thread (the
- * window surface asks for a redraw from inside attach(), which runs here,
- * and a redraw on the spot would present mid-attach).
+ * so that AChoreographer can; a condition-variable queue on Windows, where
+ * high-resolution threadpool timers and DWM composition timing post to it; a
+ * poll on an eventfd elsewhere, which is what the host tests run. Tasks posted
+ * run in order, each after the ones posted before it, and never on the spot,
+ * also when posted from this thread (the window surface asks for a redraw from
+ * inside attach(), which runs here, and a redraw on the spot would present
+ * mid-attach).
  *
  * Nothing waits for a task but postAndWait, with a bound: a present holds
  * the thread for as long as its pipelines take to compile, and a main
@@ -310,6 +320,41 @@ private:
   // it no post would ever wake the loop, so its failure is thrown, not
   // carried.
   int _wakeup = makeWakeup();
+#elif defined(_WIN32)
+  // A condition-variable loop on Windows: tasks posted from any thread (the UI
+  // thread, the render thread pool, or the high-resolution threadpool timer in
+  // PresentThreadTimer / AnimationFrameSource) wake the loop under _mutex and
+  // drain in FIFO order. Named for the debugger via SetThreadDescription and
+  // raised above normal priority so presents are scheduled promptly at vsync.
+  void loop() {
+    const int wideLen =
+        MultiByteToWideChar(CP_UTF8, 0, _name.c_str(), -1, nullptr, 0);
+    if (wideLen > 0) {
+      std::wstring wideName(static_cast<size_t>(wideLen), L'\0');
+      MultiByteToWideChar(CP_UTF8, 0, _name.c_str(), -1, wideName.data(),
+                          wideLen);
+      SetThreadDescription(GetCurrentThread(), wideName.c_str());
+    }
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    markStarted();
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lock(_mutex);
+        _wakeup.wait(lock, [this]() {
+          return !_tasks.empty() || _stopping.load(std::memory_order_acquire);
+        });
+      }
+      drain();
+      if (_stopping.load(std::memory_order_acquire)) {
+        break;
+      }
+    }
+    drain();
+  }
+
+  void wake() { _wakeup.notify_all(); }
+
+  std::condition_variable _wakeup;
 #else
 #error "rnsurface::RenderThread has no loop for this platform"
 #endif

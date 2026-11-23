@@ -19,6 +19,14 @@
 #include <unistd.h>
 #elif defined(__APPLE__)
 #include <pthread/qos.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 #include "RNDawnUtils.h"
@@ -314,6 +322,9 @@ private:
     setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 10);
 #elif defined(__APPLE__)
     pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#elif defined(_WIN32)
+    SetThreadDescription(GetCurrentThread(), L"RNSkia Warmup");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 #endif
   }
 

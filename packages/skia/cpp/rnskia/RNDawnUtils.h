@@ -23,7 +23,9 @@
 
 namespace DawnUtils {
 
-#ifdef __APPLE__
+// DXGI flip-model swapchains on Windows (D3D12) and CAMetalLayer on Apple both
+// use BGRA8Unorm natively; Vulkan on Android prefers RGBA8Unorm.
+#if defined(__APPLE__) || defined(_WIN32)
 static const SkColorType PreferedColorType = kBGRA_8888_SkColorType;
 static const wgpu::TextureFormat PreferredTextureFormat =
     wgpu::TextureFormat::BGRA8Unorm;
@@ -38,10 +40,14 @@ static const wgpu::TextureFormat PreferredTextureFormat =
 // this is about banding, not HDR.
 // - Apple: 16-bit float, displayed through the extended sRGB layer colorspace
 //   so colors match the 8-bit path exactly.
+// - Windows (D3D12): 16-bit float (DXGI_FORMAT_R16G16B16A16_FLOAT). DXGI
+//   composition swapchains support both RGBA16Float and RGB10A2Unorm, and
+//   RGBA16Float keeps full 16-bit alpha precision for translucent canvases
+//   where RGB10A2Unorm only has 2 bits of alpha.
 // - Android: 10-bit unorm. SurfaceFlinger quantizes SDR float16 layers during
 //   composition, but RGBA_1010102 buffers keep their precision through
 //   composition, including direct scanout on 10-bit panels.
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
 static const SkColorType HighBitDepthColorType = kRGBA_F16_SkColorType;
 static const wgpu::TextureFormat HighBitDepthTextureFormat =
     wgpu::TextureFormat::RGBA16Float;
@@ -115,6 +121,10 @@ inline const char *backendTypeName(wgpu::BackendType type) {
     return "Metal";
   case wgpu::BackendType::Vulkan:
     return "Vulkan";
+  case wgpu::BackendType::D3D11:
+    return "D3D11";
+  case wgpu::BackendType::D3D12:
+    return "D3D12";
   case wgpu::BackendType::OpenGL:
     return "OpenGL";
   case wgpu::BackendType::OpenGLES:
@@ -179,11 +189,14 @@ inline bool isImagination(const wgpu::Adapter &adapter) {
   return info.vendorID == kVendorIDImagination;
 }
 
-// The backend Skia renders with: Metal on Apple, Vulkan on Android.
+// The backend Skia renders with: Metal on Apple, Vulkan on Android, D3D12 on
+// Windows.
 #ifdef __APPLE__
 constexpr auto kPlatformBackendType = wgpu::BackendType::Metal;
-#elif __ANDROID__
+#elif defined(__ANDROID__)
 constexpr auto kPlatformBackendType = wgpu::BackendType::Vulkan;
+#elif defined(_WIN32)
+constexpr auto kPlatformBackendType = wgpu::BackendType::D3D12;
 #endif
 
 // Why no adapter was found, for the error raised to JS: every adapter Dawn
@@ -512,6 +525,14 @@ createDawnBackendContext(dawn::native::Instance *instance,
       wgpu::FeatureName::MultiPlanarFormatP010,
       wgpu::FeatureName::MultiPlanarFormatP210,
       wgpu::FeatureName::MultiPlanarFormatExtendedUsages,
+#elif defined(_WIN32)
+      // D3D12 equivalent of the above: zero-copy texture import via DXGI
+      // shared handles or ID3D12Resource pointers, and fence synchronization
+      // via DXGI shared fence handles (EndAccess exports a shared fence).
+      wgpu::FeatureName::SharedTextureMemoryDXGISharedHandle,
+      wgpu::FeatureName::SharedTextureMemoryD3D12Resource,
+      wgpu::FeatureName::SharedFenceDXGISharedHandle,
+      wgpu::FeatureName::DawnMultiPlanarFormats,
 #else
       wgpu::FeatureName::SharedTextureMemoryAHardwareBuffer,
       // Vulkan equivalent of the above: EndAccess exports a sync-fd fence.

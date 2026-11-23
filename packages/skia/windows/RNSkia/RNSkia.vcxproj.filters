@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="windows">
+      <UniqueIdentifier>{9218B342-674E-4287-96D6-E972C462A1B1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="cpp">
+      <UniqueIdentifier>{3F88D0F5-1536-4F1D-A76F-8C919F5E39C2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="cpp\jsi">
+      <UniqueIdentifier>{57B27A2A-2C51-4C53-A19C-4E1E9350615A}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="cpp\rnskia">
+      <UniqueIdentifier>{71A3C9E2-5C27-4479-91F2-24D9D86A428D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="cpp\rnwgpu">
+      <UniqueIdentifier>{A28E1C8D-9F6A-4287-B8B1-F34A279F01D7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="cpp\api">
+      <UniqueIdentifier>{C4F9B30E-D614-4F08-89D0-19A36B42718F}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="pch.h">
+      <Filter>windows</Filter>
+    </ClInclude>
+    <ClInclude Include="ReactPackageProvider.h">
+      <Filter>windows</Filter>
+    </ClInclude>
+    <ClInclude Include="RNSkAnimationFrame.h">
+      <Filter>windows</Filter>
+    </ClInclude>
+    <ClInclude Include="RNSkiaModule.h">
+      <Filter>windows</Filter>
+    </ClInclude>
+    <ClInclude Include="RNSkPresentThreadTimer.h">
+      <Filter>windows</Filter>
+    </ClInclude>
+    <ClInclude Include="RNSkWindowsPlatformContext.h">
+      <Filter>windows</Filter>
+    </ClInclude>
+    <ClInclude Include="SkiaView.h">
+      <Filter>windows</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="pch.cpp">
+      <Filter>windows</Filter>
+    </ClCompile>
+    <ClCompile Include="ReactPackageProvider.cpp">
+      <Filter>windows</Filter>
+    </ClCompile>
+    <ClCompile Include="RNSkiaModule.cpp">
+      <Filter>windows</Filter>
+    </ClCompile>
+    <ClCompile Include="RNSkWindowsPlatformContext.cpp">
+      <Filter>windows</Filter>
+    </ClCompile>
+    <ClCompile Include="SkiaView.cpp">
+      <Filter>windows</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\jsi\JSICache.cpp">
+      <Filter>cpp\jsi</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\jsi\JsiPromises.cpp">
+      <Filter>cpp\jsi</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\jsi\Promise.cpp">
+      <Filter>cpp\jsi</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\rnskia\RNDawnInterop.cpp">
+      <Filter>cpp\rnskia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\rnskia\RNSkGraphiteProducer.cpp">
+      <Filter>cpp\rnskia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\rnskia\RNSkManager.cpp">
+      <Filter>cpp\rnskia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\rnskia\RNSkWindowSurface.cpp">
+      <Filter>cpp\rnskia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\rnwgpu\DawnBlobCache.cpp">
+      <Filter>cpp\rnwgpu</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\api\third_party\base64.cpp">
+      <Filter>cpp\api</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\api\third_party\CSSColorParser.cpp">
+      <Filter>cpp\api</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\cpp\api\third_party\SkottieUtils.cpp">
+      <Filter>cpp\api</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Midl Include="ReactPackageProvider.idl">
+      <Filter>windows</Filter>
+    </Midl>
+  </ItemGroup>
+</Project>

@@ -22,6 +22,14 @@
 #include <pthread.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace RNSkia {
@@ -227,6 +235,10 @@ private:
     // ANDROID_PRIORITY_DISPLAY; with PRIO_PROCESS and who = 0, Linux applies
     // the nice value to the calling thread only.
     setpriority(PRIO_PROCESS, 0, -4);
+#elif defined(_WIN32)
+    auto wideName = L"RNSkia Render " + std::to_wstring(index + 1);
+    SetThreadDescription(GetCurrentThread(), wideName.c_str());
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
   }
 

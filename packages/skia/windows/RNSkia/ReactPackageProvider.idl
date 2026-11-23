@@ -1,0 +1,11 @@
+// The WinRT entry point React Native for Windows autolinking discovers for
+// react-native-skia: the host app appends winrt::RNSkia::ReactPackageProvider()
+// to its PackageProviders list at startup, which calls CreatePackage() to
+// register the RNSkiaModule TurboModule and the SkiaView Fabric component.
+namespace RNSkia {
+  [webhosthidden]
+  [default_interface]
+  runtimeclass ReactPackageProvider : Microsoft.ReactNative.IReactPackageProvider {
+    ReactPackageProvider();
+  };
+} // namespace RNSkia

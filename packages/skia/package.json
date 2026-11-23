@@ -32,6 +32,7 @@
     "jestEnv.js",
     "cpp/**/*.{h,cpp}",
     "apple/**",
+    "windows/**",
     "react-native-skia.podspec",
     "binaries.json",
     "Package.swift",

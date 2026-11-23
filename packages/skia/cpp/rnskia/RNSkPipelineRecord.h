@@ -4,7 +4,11 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 #include <unordered_set>
 #include <vector>
 
@@ -153,8 +157,12 @@ public:
    this process's, moved into place once complete. Whether it was written.
    */
   static bool write(const std::string &path, const std::vector<Key> &keys) {
-    const std::string temporary =
-        path + ".tmp" + std::to_string(static_cast<long>(getpid()));
+#if defined(_WIN32)
+    const long pid = static_cast<long>(_getpid());
+#else
+    const long pid = static_cast<long>(getpid());
+#endif
+    const std::string temporary = path + ".tmp" + std::to_string(pid);
     std::FILE *file = std::fopen(temporary.c_str(), "wb");
     if (file == nullptr) {
       return false;

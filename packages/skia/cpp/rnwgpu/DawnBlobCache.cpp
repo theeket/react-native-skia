@@ -1,8 +1,21 @@
 #include "DawnBlobCache.h"
 
+#if defined(_WIN32)
+#include <direct.h>
+#include <process.h>
+#include <sys/stat.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include <chrono>
 #include <condition_variable>
@@ -158,11 +171,24 @@ private:
 
 // Creates `dir` and any of its parents that are missing.
 void makeDirectories(const std::string &dir) {
+#if defined(_WIN32)
+  // Windows paths may use either '/' or '\\' and start with a drive letter
+  // ("C:\"): skip the root drive prefix and create each parent directory in
+  // turn with _mkdir.
+  for (size_t pos = 0; pos < dir.size(); ++pos) {
+    if ((dir[pos] == '/' || dir[pos] == '\\') && pos > 0 &&
+        !(pos == 2 && dir[1] == ':')) {
+      _mkdir(dir.substr(0, pos).c_str());
+    }
+  }
+  _mkdir(dir.c_str());
+#else
   for (size_t slash = dir.find('/', 1); slash != std::string::npos;
        slash = dir.find('/', slash + 1)) {
     mkdir(dir.substr(0, slash).c_str(), 0700);
   }
   mkdir(dir.c_str(), 0700);
+#endif
 }
 
 // One file per entry, named by a 64-bit FNV-1a hash of its key.
@@ -186,6 +212,8 @@ off_t entryBytes(size_t keySize, size_t valueSize) {
 timespec modificationTime(const struct stat &info) {
 #ifdef __APPLE__
   return info.st_mtimespec;
+#elif defined(_WIN32)
+  return timespec{info.st_mtime, 0};
 #else
   return info.st_mtim;
 #endif
@@ -298,7 +326,12 @@ void writeEntry(const std::string &dir, const std::vector<uint8_t> &key,
       return;
     }
   }
-  const std::string temporary = path + "." + std::to_string(getpid()) + ".tmp";
+#if defined(_WIN32)
+  const auto pid = _getpid();
+#else
+  const auto pid = getpid();
+#endif
+  const std::string temporary = path + "." + std::to_string(pid) + ".tmp";
   FILE *file = fopen(temporary.c_str(), "wb");
   if (file == nullptr) {
     return;
@@ -380,6 +413,35 @@ void noteMeasured(const std::string &dir) {
 // left unfinished on the way. Runs on the writer.
 Contents measure(const std::string &dir) {
   Contents contents;
+#if defined(_WIN32)
+  WIN32_FIND_DATAA findData{};
+  const std::string pattern = dir + "/*";
+  HANDLE listing = FindFirstFileA(pattern.c_str(), &findData);
+  if (listing != INVALID_HANDLE_VALUE) {
+    const time_t now = time(nullptr);
+    do {
+      const std::string name = findData.cFileName;
+      const Kind kind = kindOf(name);
+      if (kind == Kind::Other) {
+        continue;
+      }
+      const std::string path = dir + "/" + name;
+      struct stat info{};
+      if (stat(path.c_str(), &info) != 0) {
+        continue;
+      }
+      if (kind == Kind::Temporary) {
+        if (now - info.st_mtime > kAbandonedWriteSeconds) {
+          remove(path.c_str());
+        }
+        continue;
+      }
+      contents.bytes += info.st_size;
+      contents.entries.push_back(path);
+    } while (FindNextFileA(listing, &findData) != 0);
+    FindClose(listing);
+  }
+#else
   if (DIR *listing = opendir(dir.c_str())) {
     const time_t now = time(nullptr);
     while (dirent *entry = readdir(listing)) {
@@ -404,6 +466,7 @@ Contents measure(const std::string &dir) {
     }
     closedir(listing);
   }
+#endif
   noteMeasured(dir);
   return contents;
 }
@@ -434,7 +497,14 @@ void DawnBlobCache::setDirectory(const std::string &dir) {
   if (!usable.empty()) {
     makeDirectories(usable);
     struct stat info{};
-    if (stat(usable.c_str(), &info) != 0 || !S_ISDIR(info.st_mode)) {
+#if defined(_WIN32)
+    const bool isDir =
+        stat(usable.c_str(), &info) == 0 && (info.st_mode & _S_IFDIR) != 0;
+#else
+    const bool isDir =
+        stat(usable.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+#endif
+    if (!isDir) {
       // Nowhere to keep blobs: leave the cache off rather than fail every
       // load and store.
       usable.clear();

@@ -408,7 +408,10 @@ void RNSkWindowSurface::configureSurface() {
   config.height = _height;
   config.presentMode = wgpu::PresentMode::Fifo;
   config.usage = _usage;
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
+  // Premultiplied alpha for CAMetalLayer on Apple and DirectComposition /
+  // SwapChainPanel on Windows so translucent canvases blend with the views
+  // behind them.
   config.alphaMode = wgpu::CompositeAlphaMode::Premultiplied;
 #endif
   // The colorspace of a CAMetalLayer is not set here: the platform view tags

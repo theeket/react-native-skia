@@ -17,6 +17,16 @@
 #include <syslog.h>
 #endif
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace RNSkia {
 
 namespace jsi = facebook::jsi;
@@ -34,6 +44,11 @@ public:
 
 #ifdef TARGET_OS_IPHONE
     syslog(LOG_ERR, "%s\n", message.c_str());
+#endif
+
+#if defined(_WIN32)
+    std::string line = "RNSkia: " + message + "\n";
+    OutputDebugStringA(line.c_str());
 #endif
   }
 
@@ -53,6 +68,10 @@ public:
 #endif
 #ifdef TARGET_OS_IPHONE
     syslog(LOG_ERR, "RNSKIA: %s\n", buffer);
+#endif
+#if defined(_WIN32)
+    std::string line = std::string("RNSKIA: ") + buffer + "\n";
+    OutputDebugStringA(line.c_str());
 #endif
     va_end(args);
   }

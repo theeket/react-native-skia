@@ -14,10 +14,12 @@ namespace RNSkia {
 /**
  * The pacing policy of the platform (see rnsurface::FrameScheduler::Policy),
  * but for what the window shows, which each view knows once it has one. On
- * Android a present waits for the GPU to finish the frame presented before
- * it, so a frame that comes meanwhile has its present deferred; a Metal
- * present does not wait. The frames in flight follow the measured time of
- * the recordings.
+ * Android and Windows, a present waits for the GPU to finish the frame
+ * presented before it (libgui's queueBuffer on Android; IDXGISwapChain::Present
+ * with sync interval 1 and SwapChainD3D12::GetCurrentTextureImpl's
+ * WaitForSerial on the back buffer on Windows), so a frame that comes meanwhile
+ * has its present deferred; a Metal present does not wait. The frames in flight
+ * follow the measured time of the recordings.
  *
  * For measuring one policy against another on the same build, a comma
  * separated list overrides it, read once per process: the system property
@@ -58,7 +60,12 @@ inline rnsurface::FrameScheduler::Policy platformPacingPolicy() {
   using Scheduler = rnsurface::FrameScheduler;
   static const Scheduler::Policy policy = []() {
     Scheduler::Policy made;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(_WIN32)
+    // Both Android (Vulkan queueBuffer) and Windows (D3D12 DXGI flip-model
+    // swapchains) block on the present thread inside Dawn's device lock when
+    // the GPU is still busy with the previous frame: deferring the present
+    // submits the frame's GPU work now and presents once the previous work
+    // completes, keeping the shared present thread unblocked.
     made.waitForPreviousWork = Scheduler::WaitForPreviousWork::kBeforePresent;
 #else
     made.waitForPreviousWork = Scheduler::WaitForPreviousWork::kNever;

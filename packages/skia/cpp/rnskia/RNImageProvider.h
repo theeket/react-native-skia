@@ -20,6 +20,14 @@
 #elif defined(__ANDROID__)
 #include <pthread.h>
 #include <sys/resource.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 #pragma clang diagnostic push
@@ -466,6 +474,9 @@ private:
       // ANDROID_PRIORITY_BACKGROUND, for this thread only (see
       // RNSkThreadPool).
       setpriority(PRIO_PROCESS, 0, 10);
+#elif defined(_WIN32)
+      SetThreadDescription(GetCurrentThread(), L"RNSkia Images");
+      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 #endif
       std::vector<sk_sp<SkImage>> released;
       std::unique_lock<std::mutex> lock(_mutex);

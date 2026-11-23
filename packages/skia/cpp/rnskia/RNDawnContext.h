@@ -20,6 +20,14 @@
 #include <pthread.h>
 #elif defined(__ANDROID__)
 #include <pthread.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 #include "RNDawnUtils.h"
@@ -632,6 +640,13 @@ public:
     // Note: SharedFenceMTLSharedEvent intentionally NOT enabled — it causes
     // EndAccess to encode fence signals that crash with "uncommitted encoder".
     // IOSurface data is already written by the camera before we read it.
+#elif defined(_WIN32)
+        // DXGI shared handles and D3D12 resources for zero-copy texture
+        // sharing (camera frames, video decoders, or external D3D11/D3D12
+        // pipelines) on the secondary device.
+        wgpu::FeatureName::SharedTextureMemoryDXGISharedHandle,
+        wgpu::FeatureName::SharedTextureMemoryD3D12Resource,
+        wgpu::FeatureName::DawnMultiPlanarFormats,
 #endif
     };
 
@@ -761,19 +776,37 @@ public:
   }
 
   // The Dawn surface over a native window: a CAMetalLayer on Apple
-  // platforms, an ANativeWindow on Android (see RNSkWindowSurface).
+  // platforms, an ANativeWindow on Android, a WinUI 3 SwapChainPanel (or an
+  // HWND) on Windows (see RNSkWindowSurface).
   wgpu::Surface MakeWGPUSurface(void *window) {
     wgpu::SurfaceDescriptor surfaceDescriptor;
 #ifdef __APPLE__
     wgpu::SurfaceSourceMetalLayer metalSurfaceDesc;
     metalSurfaceDesc.layer = window;
     surfaceDescriptor.nextInChain = &metalSurfaceDesc;
+    return wgpu::Instance(instance->Get()).CreateSurface(&surfaceDescriptor);
+#elif defined(_WIN32)
+    // On Windows a canvas is hosted in a WinUI 3 SwapChainPanel (handed over
+    // as an IUnknown* / IWinUISwapChainPanelNative* for composition swapchains,
+    // see SkiaView.cpp), or directly in a Win32 HWND in standalone hosts.
+    // IsWindow() distinguishes a kernel HWND from a COM interface pointer.
+    if (window != nullptr && IsWindow(static_cast<HWND>(window)) != 0) {
+      wgpu::SurfaceSourceWindowsHWND hwndSurfaceDesc;
+      hwndSurfaceDesc.hinstance = GetModuleHandleW(nullptr);
+      hwndSurfaceDesc.hwnd = window;
+      surfaceDescriptor.nextInChain = &hwndSurfaceDesc;
+      return wgpu::Instance(instance->Get()).CreateSurface(&surfaceDescriptor);
+    }
+    wgpu::SurfaceDescriptorFromWindowsWinUISwapChainPanel winUIPanelDesc;
+    winUIPanelDesc.swapChainPanel = window;
+    surfaceDescriptor.nextInChain = &winUIPanelDesc;
+    return wgpu::Instance(instance->Get()).CreateSurface(&surfaceDescriptor);
 #else
     wgpu::SurfaceSourceAndroidNativeWindow androidSurfaceDesc;
     androidSurfaceDesc.window = window;
     surfaceDescriptor.nextInChain = &androidSurfaceDesc;
-#endif
     return wgpu::Instance(instance->Get()).CreateSurface(&surfaceDescriptor);
+#endif
   }
 
   /**
@@ -962,6 +995,8 @@ private:
       pthread_setname_np("RNSkia GPU Recovery");
 #elif defined(__ANDROID__)
       pthread_setname_np(pthread_self(), "RNSkia GPU Recovery");
+#elif defined(_WIN32)
+      SetThreadDescription(GetCurrentThread(), L"RNSkia GPU Recovery");
 #endif
       if (delay.count() > 0) {
         std::this_thread::sleep_for(delay);
@@ -1221,6 +1256,8 @@ private:
     pthread_setname_np("RNSkia Readback");
 #elif defined(__ANDROID__)
     pthread_setname_np(pthread_self(), "RNSkia Readback");
+#elif defined(_WIN32)
+    SetThreadDescription(GetCurrentThread(), L"RNSkia Readback");
 #endif
     wgpu::Instance waiter(instance->Get());
     for (;;) {

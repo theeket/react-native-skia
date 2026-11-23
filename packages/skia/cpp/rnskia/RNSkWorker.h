@@ -12,6 +12,14 @@
 #include <pthread.h>
 #elif defined(__ANDROID__)
 #include <pthread.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace RNSkia {
@@ -51,6 +59,8 @@ private:
     pthread_setname_np("RNSkia Worker");
 #elif defined(__ANDROID__)
     pthread_setname_np(pthread_self(), "RNSkia Worker");
+#elif defined(_WIN32)
+    SetThreadDescription(GetCurrentThread(), L"RNSkia Worker");
 #endif
     for (;;) {
       std::function<void()> job;
