@@ -81,7 +81,8 @@ const ParagraphOutputsWindows = BUILD_WITH_PARAGRAPH
 // Dawn is not taken from the GN build: skia_use_dawn makes it build Dawn's
 // non-monolithic libdawn_combined.a as a dependency of the Graphite sources,
 // but what ships is the monolithic libwebgpu_dawn that build-dawn.ts builds
-// from the same checkout.
+// from the same checkout. Windows bundles GN objects into skia_combined.dll
+// against the standalone Dawn DLL; GN's Dawn archive remains unused at that link.
 
 export const commonArgs = [
   // No RAW codec: React Native apps do not decode camera RAW files through
@@ -292,6 +293,7 @@ export const configurations: {
       ...ParagraphArgsWindows,
     ],
     outputRoot: "libs/windows",
+    // GN archive inputs to the separate skia_combined DLL link, not staged outputs.
     outputNames: [
       "skia.lib",
       "skshaper.lib",

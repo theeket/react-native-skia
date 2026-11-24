@@ -22,7 +22,7 @@ import {
   SkiaSrc,
   WasmLibs,
 } from "./skia-configuration";
-import { applyDawnPatches } from "./dawn-configuration";
+import { applyDawnPatches, DawnLibs } from "./dawn-configuration";
 import {
   activateEmsdk,
   buildEmdawnwebgpuPackage,
@@ -30,7 +30,11 @@ import {
   writeWasmMetadata,
 } from "./wasm-configuration";
 import { fileOps, pythonExecutable, run, runSync } from "./utils";
-import { getWindowsBuildEnvironment } from "./windows-build";
+import {
+  combineWindowsSkia,
+  getWindowsBuildEnvironment,
+  requireWindowsDawn,
+} from "./windows-build";
 
 const pathKey =
   Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ??
@@ -258,7 +262,9 @@ export const copyLib = (
  * (e.g. libs/apple/iphonesimulator/). Staging directories are removed on successful
  * SDK assembly; GN intermediates remain. Android uses libs/android/<abi>/
  * (e.g. libs/android/arm64-v8a/) and Windows uses libs/windows/<arch>/
- * (e.g. libs/windows/x64/). package-binaries assembles npm XCFrameworks.
+ * (e.g. libs/windows/x64/), containing skia_combined.dll and its import .lib.
+ * Build the matching Dawn DLL first with yarn build-dawn windows[-<arch>].
+ * package-binaries assembles npm XCFrameworks.
  * wasm uses libs/wasm/ with its own headers and emdawnwebgpu package next to
  * the archives; see wasm-configuration.ts.
  *
@@ -272,6 +278,18 @@ export const copyLib = (
     Object.keys(skiaTargets)
   );
 
+  // The separate DLL link needs Dawn first. Reject missing/stale static builds
+  // before dependency sync or compilation, leaving existing staged binaries intact.
+  for (const name of selectedTargets) {
+    const target = skiaTargets[name];
+    if (target.platform === "windows") {
+      requireWindowsDawn(
+        path.join(DawnLibs, "windows", target.architecture),
+        target.architecture
+      );
+    }
+  }
+
   // Resolve local or published headers before syncing or deleting build outputs.
   await prepareDawnHeaders();
 
@@ -281,9 +299,6 @@ export const copyLib = (
   // Check Android environment variables if android is in target platforms
   const hasAndroid = selectedTargets.some(
     (name) => skiaTargets[name].platform === "android"
-  );
-  const hasWindows = selectedTargets.some(
-    (name) => skiaTargets[name].platform === "windows"
   );
   const hasWasm = selectedTargets.some(
     (name) => skiaTargets[name].platform === "wasm"
@@ -320,15 +335,9 @@ export const copyLib = (
   applySkiaPatches();
   applyDawnPatches();
 
-  // Clear Android and Windows outputs before staging the selected architectures.
+  // Clear Android outputs; Windows replaces only successfully bundled targets.
   if (hasAndroid) {
     fs.rmSync(path.join(PackageRoot, configurations.android.outputRoot), {
-      recursive: true,
-      force: true,
-    });
-  }
-  if (hasWindows) {
-    fs.rmSync(path.join(PackageRoot, configurations.windows.outputRoot), {
       recursive: true,
       force: true,
     });
@@ -361,11 +370,14 @@ export const copyLib = (
         configuration.outputNames
       );
     } else if (platform === "windows") {
-      copyLib(
-        platform,
+      await combineWindowsSkia(
+        SkiaSrc,
+        getOutDir(platform, architecture),
+        skiaTargetOutputDir(name),
+        path.join(DawnLibs, "windows", architecture),
         architecture,
-        configurations.windows.targets[architecture].output,
-        configuration.outputNames
+        configuration.outputNames,
+        env
       );
     } else if (platform === "wasm") {
       const destination = skiaTargetOutputDir(name);

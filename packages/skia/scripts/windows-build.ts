@@ -1,6 +1,7 @@
+import fs from "fs";
 import path from "path";
 
-import { runSync } from "./utils";
+import { run, runSync } from "./utils";
 
 export type WindowsBuildEnvironment = {
   // Compiler PATH, INCLUDE, LIB, and SDK settings inherited by build subprocesses.
@@ -110,4 +111,299 @@ Get-ChildItem Env: | ForEach-Object { $environment[$_.Name] = $_.Value }
     "cl.exe"
   );
   return { env, gnArgs, compiler };
+};
+
+// These pairs are the distributable Windows outputs; GN archives remain intermediates.
+export const windowsSkiaOutputs = ["skia_combined.dll", "skia_combined.lib"];
+export const windowsDawnOutputs = ["webgpu_dawn.dll", "webgpu_dawn.lib"];
+
+/** Reject stale or mixed-architecture DLLs before linking or staging them. */
+export const validateWindowsDll = (file: string, architecture: string) => {
+  const machine = { x64: 0x8664, arm64: 0xaa64 }[architecture];
+  if (!machine) {
+    throw new Error(`Unsupported Windows architecture: ${architecture}`);
+  }
+  const descriptor = fs.openSync(file, "r");
+  try {
+    const header = Buffer.alloc(64);
+    if (
+      fs.readSync(descriptor, header, 0, 64, 0) !== 64 ||
+      header.toString("ascii", 0, 2) !== "MZ"
+    ) {
+      throw new Error(`${file} is not a Windows DLL`);
+    }
+    const pe = Buffer.alloc(24);
+    if (
+      fs.readSync(descriptor, pe, 0, pe.length, header.readUInt32LE(60)) !==
+        pe.length ||
+      pe.readUInt32LE(0) !== 0x4550 ||
+      !(pe.readUInt16LE(22) & 0x2000)
+    ) {
+      throw new Error(`${file} is not a Windows DLL`);
+    }
+    if (pe.readUInt16LE(4) !== machine) {
+      throw new Error(`${file} does not match Windows ${architecture}`);
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+};
+
+/** A static Dawn archive cannot stand in for the DLL's import library. */
+export const requireWindowsDawn = (
+  directory: string,
+  architecture: string,
+  runtimeDirectory = directory
+) => {
+  const instruction = `Run yarn build-dawn windows-${architecture} first`;
+  const dll = path.join(runtimeDirectory, windowsDawnOutputs[0]);
+  const file = path.join(directory, windowsDawnOutputs[1]);
+  for (const output of [dll, file]) {
+    if (!fs.existsSync(output)) {
+      throw new Error(`${output} is missing. ${instruction}`);
+    }
+  }
+  validateWindowsDll(dll, architecture);
+  const descriptor = fs.openSync(file, "r");
+  try {
+    // The first COFF archive member holds defined symbols, including the DLL descriptor.
+    const header = Buffer.alloc(68);
+    fs.readSync(descriptor, header, 0, header.length, 0);
+    const size = Number(header.toString("ascii", 56, 66).trim());
+    if (
+      header.toString("ascii", 0, 8) !== "!<arch>\n" ||
+      !Number.isSafeInteger(size) ||
+      size < 4 ||
+      size > 16 * 1024 * 1024
+    ) {
+      throw new Error(`${file} is not a Dawn import library. ${instruction}`);
+    }
+    const symbols = Buffer.alloc(size);
+    fs.readSync(descriptor, symbols, 0, size, 68);
+    if (!symbols.includes(Buffer.from("__IMPORT_DESCRIPTOR_webgpu_dawn\0"))) {
+      throw new Error(
+        `${file} is a static or incompatible Dawn library. ${instruction}`
+      );
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+};
+
+/** Dawn puts runtime DLLs at the build root and import libraries beside the target. */
+export const stageWindowsDawn = (
+  buildDir: string,
+  destination: string,
+  architecture: string
+) => {
+  const nativeDir = path.join(buildDir, "src", "dawn", "native");
+  // Validate both source files before replacing any previously staged binaries.
+  requireWindowsDawn(nativeDir, architecture, buildDir);
+  fs.mkdirSync(destination, { recursive: true });
+  for (const name of windowsDawnOutputs) {
+    const source = name.endsWith(".dll") ? buildDir : nativeDir;
+    const output = path.join(destination, name);
+    fs.copyFileSync(path.join(source, name), output);
+    console.log(`Windows ${architecture}: ${output}`);
+  }
+};
+
+type GnTarget = {
+  type: string;
+  outputs?: string[];
+  deps?: string[];
+  libs?: string[];
+};
+
+/** Resolve module dependencies from GN rather than maintaining a second codec/ICU list. */
+export const windowsSkiaLinkInputs = (
+  targets: Record<string, GnTarget>,
+  sourceDir: string,
+  buildDir: string,
+  libraries: string[]
+) => {
+  const resolve = (file: string) =>
+    file.startsWith("//")
+      ? path.join(sourceDir, file.slice(2))
+      : path.resolve(sourceDir, file);
+  const expected = libraries.map((library) => path.join(buildDir, library));
+  const roots = Object.values(targets).filter(
+    (target) =>
+      target.type === "static_library" &&
+      target.outputs?.some((output) => expected.includes(resolve(output)))
+  );
+  for (const library of libraries) {
+    if (
+      !roots.some((target) =>
+        target.outputs?.some((output) => path.basename(output) === library)
+      )
+    ) {
+      throw new Error(`GN did not describe the Windows archive ${library}`);
+    }
+  }
+  const archives = new Set<string>();
+  const systemLibraries = new Map<string, string>();
+  const visited = new Set<GnTarget>();
+  const visit = (target: GnTarget) => {
+    if (visited.has(target)) {
+      return;
+    }
+    visited.add(target);
+    if (target.type === "static_library") {
+      target.outputs
+        ?.filter((output) => output.endsWith(".lib"))
+        .forEach((output) => archives.add(resolve(output)));
+    }
+    for (const library of target.libs ?? []) {
+      // GN's full Dawn build remains a dependency. This separate DLL link uses only
+      // webgpu_dawn.lib, and /MD instead of Dawn's inherited static C++ runtime.
+      if (
+        library.toLowerCase() !== "libcpmt.lib" &&
+        !library.includes("/") &&
+        !library.includes("\\")
+      ) {
+        systemLibraries.set(library.toLowerCase(), library);
+      }
+    }
+    for (const dependency of target.deps ?? []) {
+      if (dependency.startsWith("//third_party/dawn:")) {
+        continue;
+      }
+      const child = targets[dependency];
+      if (!child) {
+        throw new Error(`GN did not describe ${dependency}`);
+      }
+      visit(child);
+    }
+  };
+  roots.forEach(visit);
+  return {
+    archives: [...archives],
+    systemLibraries: [...systemLibraries.values()],
+  };
+};
+
+/** Link existing GN objects into one DLL; never embed GN's dawn_combined library. */
+export const combineWindowsSkia = async (
+  sourceDir: string,
+  buildDir: string,
+  destination: string,
+  dawnDirectory: string,
+  architecture: string,
+  libraries: string[],
+  env: NodeJS.ProcessEnv
+) => {
+  requireWindowsDawn(dawnDirectory, architecture);
+  if (!env.VCToolsInstallDir || !env.VSCMD_ARG_HOST_ARCH) {
+    throw new Error(
+      "The Windows DLL link requires an initialized Visual Studio environment"
+    );
+  }
+  const compiler = path.join(
+    env.VCToolsInstallDir,
+    "bin",
+    `Host${env.VSCMD_ARG_HOST_ARCH}`,
+    architecture,
+    "cl.exe"
+  );
+  const targets = JSON.parse(
+    runSync(
+      path.join(sourceDir, "bin", "gn.exe"),
+      ["desc", buildDir, "*", "--format=json"],
+      { cwd: sourceDir, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }
+    )
+  ) as Record<string, GnTarget>;
+  const { archives, systemLibraries } = windowsSkiaLinkInputs(
+    targets,
+    sourceDir,
+    buildDir,
+    libraries
+  );
+  const modules = archives.filter((archive) =>
+    libraries.includes(path.basename(archive))
+  );
+  const dependencies = archives.filter((archive) => !modules.includes(archive));
+  const objects = new Set<string>();
+  for (const archive of modules) {
+    const members = runSync("lib.exe", ["/nologo", "/list", archive], {
+      env,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    for (const member of members.split(/\r?\n/).filter((line) => line.trim())) {
+      const object = path.resolve(buildDir, member.trim());
+      if (!object.endsWith(".obj") || !fs.existsSync(object)) {
+        throw new Error(`Cannot reuse GN object ${object} from ${archive}`);
+      }
+      objects.add(object);
+    }
+  }
+  const combined = path.join(buildDir, "combined");
+  fs.mkdirSync(combined, { recursive: true });
+  // Bracket arguments preserve spaces and literal dollar signs in CMake paths.
+  const cmakeList = (name: string, values: string[]) =>
+    `set(${name}\n${values
+      .map((value) => {
+        const normalized = value.replace(/\\/g, "/");
+        let equals = "=";
+        while (normalized.includes(`]${equals}]`)) {
+          equals += "=";
+        }
+        return `  [${equals}[${normalized}]${equals}]`;
+      })
+      .join("\n")}\n)\n`;
+  const inputs = path.join(combined, "inputs.cmake");
+  fs.writeFileSync(
+    inputs,
+    cmakeList("SKIA_OBJECTS", [...objects]) +
+      cmakeList("SKIA_DEPENDENCIES", dependencies) +
+      cmakeList("SKIA_SYSTEM_LIBRARIES", systemLibraries)
+  );
+  const label = `Windows ${architecture}`;
+  await run(
+    "cmake",
+    [
+      "-S",
+      path.join(__dirname, "windows"),
+      "-B",
+      combined,
+      "-G",
+      "Ninja",
+      "-DCMAKE_BUILD_TYPE=Release",
+      `-DCMAKE_CXX_COMPILER=${compiler}`,
+      `-DSKIA_LINK_INPUTS=${inputs}`,
+      `-DDAWN_IMPORT_LIBRARY=${path.join(dawnDirectory, "webgpu_dawn.lib")}`,
+    ],
+    { env, label }
+  );
+  await run("cmake", ["--build", combined, "--target", "skia_combined"], {
+    env,
+    label,
+  });
+  validateWindowsDll(path.join(combined, windowsSkiaOutputs[0]), architecture);
+  // Confirm the runtime dependency survived linking; no second Dawn implementation ships.
+  const dependents = runSync(
+    "dumpbin.exe",
+    ["/nologo", "/dependents", path.join(combined, windowsSkiaOutputs[0])],
+    { env, encoding: "utf8" }
+  );
+  if (!/webgpu_dawn\.dll/i.test(dependents)) {
+    throw new Error("skia_combined.dll does not import webgpu_dawn.dll");
+  }
+  for (const file of windowsSkiaOutputs) {
+    fs.accessSync(path.join(combined, file));
+  }
+  fs.mkdirSync(destination, { recursive: true });
+  for (const file of windowsSkiaOutputs) {
+    fs.copyFileSync(path.join(combined, file), path.join(destination, file));
+  }
+  // Remove only this architecture's previously staged static archives, after success.
+  for (const file of libraries) {
+    fs.rmSync(path.join(destination, file), { force: true });
+  }
+  console.log(
+    `Windows ${architecture}: ${windowsSkiaOutputs.join(
+      " + "
+    )} in ${destination}`
+  );
 };

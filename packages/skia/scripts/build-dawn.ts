@@ -20,7 +20,8 @@
  * produce lipo'd universal libraries; single-architecture builds copy the archive.
  * Staging directories are removed on successful SDK assembly; CMake intermediates remain.
  * Android uses libs/dawn/android/<abi>/ (e.g. libs/dawn/android/arm64-v8a/) and
- * Windows uses libs/dawn/windows/<arch>/ (e.g. libs/dawn/windows/x64/).
+ * Windows uses libs/dawn/windows/<arch>/ (e.g. libs/dawn/windows/x64/),
+ * containing webgpu_dawn.dll and its import webgpu_dawn.lib.
  * package-binaries assembles XCFrameworks for npm distribution.
  *
  * See apple-build.ts for SDK groups/architectures and

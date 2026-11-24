@@ -1,0 +1,21 @@
+[windows] Import Paragraph's shared default font families from the combined DLL
+
+CMake exports the GN objects without changing the static builds. This data
+member is referenced by inline TextStyle constructors, so Windows consumers
+need dllimport (SK_API with SKIA_DLL) instead of a direct data reference.
+Other platforms retain their existing SK_API behavior.
+
+---
+# Inline Paragraph code must access the DLL's data through its import table.
+diff --git a/modules/skparagraph/include/TextStyle.h b/modules/skparagraph/include/TextStyle.h
+--- a/modules/skparagraph/include/TextStyle.h
++++ b/modules/skparagraph/include/TextStyle.h
+@@ -297,7 +297,7 @@
+     SkFontHinting getFontHinting() const { return fHinting; }
+ 
+ private:
+-    static const std::vector<SkString>* kDefaultFontFamilies;
++    static SK_API const std::vector<SkString>* kDefaultFontFamilies;
+ 
+     Decoration fDecoration = {
+             TextDecoration::kNoDecoration,

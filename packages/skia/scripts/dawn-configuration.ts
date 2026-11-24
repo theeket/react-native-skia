@@ -12,7 +12,7 @@ import {
 import { applyPatches, listPatches } from "./patches";
 import { validateAppleArchive } from "./apple-binaries-validation";
 import { fileOps, pythonExecutable, run, runSync } from "./utils";
-import { getWindowsBuildEnvironment } from "./windows-build";
+import { getWindowsBuildEnvironment, stageWindowsDawn } from "./windows-build";
 
 // Dawn is built from the checkout Skia pins in its DEPS, so the prebuilt Dawn
 // is exactly the Dawn the Skia binaries were compiled against.
@@ -30,7 +30,7 @@ export const DawnAppleXcframework = path.join(
   `${DawnLib}.xcframework`
 );
 
-/** Library families select Android .so, Windows .lib, or Apple .a outputs, not individual SDKs. */
+/** Windows stages a DLL/import-library pair; Android uses .so and Apple uses .a. */
 export type DawnOS = "android" | "apple" | "windows";
 
 /** Apple target identity is explicit, independent of its CLI selector spelling. */
@@ -51,7 +51,7 @@ export type DawnTarget = {
 
 // Monolithic Dawn, as react-native-webgpu has always linked it: one shared
 // library on Android (both react-native-skia and react-native-webgpu load the
-// same copy), one static library per Windows architecture (D3D12 only), and one
+// same copy), one DLL per Windows architecture (D3D12 only), and one
 // static library per Apple slice (Metal only). Vulkan only on Android.
 // OpenGL ES is deliberately left out.
 const commonArgs: Record<string, string> = {
@@ -99,11 +99,12 @@ const windows = (architecture: "x64" | "arm64"): DawnTarget => ({
     ...commonArgs,
     CMAKE_SYSTEM_NAME: "Windows",
     CMAKE_SYSTEM_PROCESSOR: architecture === "arm64" ? "ARM64" : "AMD64",
-    DAWN_BUILD_MONOLITHIC_LIBRARY: "STATIC",
+    DAWN_BUILD_MONOLITHIC_LIBRARY: "SHARED",
     DAWN_ENABLE_D3D12: "ON",
     DAWN_ENABLE_D3D11: "OFF",
     DAWN_ENABLE_VULKAN: "OFF",
     DAWN_FORCE_SYSTEM_COMPONENT_LOAD: "ON",
+    CMAKE_MSVC_RUNTIME_LIBRARY: "MultiThreadedDLL",
   },
   setup: () => {
     const { env, compiler } = getWindowsBuildEnvironment(architecture);
@@ -302,7 +303,11 @@ export const buildDawnTarget = async (name: string) => {
   const outDir = dawnTargetOutputDir(name);
   fs.mkdirSync(outDir, { recursive: true });
   const lib = path.join(outDir, libName);
-  fs.copyFileSync(built, lib);
+  if (target.os === "windows") {
+    stageWindowsDawn(buildDir, outDir, target.output);
+  } else {
+    fs.copyFileSync(built, lib);
+  }
   if (target.os === "android") {
     console.log(`🤖 Stripping ${lib}`);
     runSync(path.join(ndkBin(), "llvm-strip"), [lib]);
