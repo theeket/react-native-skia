@@ -58,7 +58,6 @@
  *   --print-version Print the derived npm version and exit.
  */
 
-import { execFileSync, execSync } from "child_process";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -76,9 +75,13 @@ import {
   configurations,
   appleOutputNames,
 } from "./skia-configuration";
-import { createAppleXCFramework, validateAppleLibraries } from "./apple-build";
-import { appleConfigurations, appleSDKs } from "./apple-configuration";
-import { fileOps } from "./utils";
+import {
+  appleConfigurations,
+  appleSDKs,
+  createAppleXCFramework,
+  validateAppleLibraries,
+} from "./apple-build";
+import { fileOps, runSync } from "./utils";
 
 const LibsRoot = path.join(PackageRoot, "libs");
 const DefaultOutput = path.join(PackageRoot, "build", "binaries");
@@ -585,8 +588,12 @@ const validatePackage = (pkgDir: string, errors: string[]) => {
 };
 
 const summarize = (pkgDir: string) => {
-  const [size] = execSync(`du -sh ${pkgDir}`, { encoding: "utf8" }).split("	");
-  const files = execSync(`find ${pkgDir} -type f | wc -l`, {
+  const [size] = runSync(`du -sh ${pkgDir}`, [], {
+    shell: true,
+    encoding: "utf8",
+  }).split("	");
+  const files = runSync(`find ${pkgDir} -type f | wc -l`, [], {
+    shell: true,
     encoding: "utf8",
   }).trim();
   console.log(`   ${path.basename(pkgDir)}: ${size.trim()}, ${files} files`);
@@ -721,7 +728,7 @@ const releaseAssets = (
 // Adds to the archive when it exists already.
 const zip = (archive: string, { cwd, entries }: ArchivePart) => {
   entries.forEach((entry) => requireFile(path.join(cwd, entry)));
-  execFileSync(
+  runSync(
     "zip",
     // -X: no uid/gid nor extended timestamps; -y: a symlink stays a symlink.
     ["-q", "-r", "-X", "-y", archive, ...entries, "-x", "*.DS_Store"],

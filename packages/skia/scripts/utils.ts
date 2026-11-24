@@ -1,4 +1,4 @@
-import { spawn, execSync } from "child_process";
+import { spawn } from "child_process";
 import fs, {
   copyFileSync,
   existsSync,
@@ -22,35 +22,46 @@ export const ensureFolderExists = (dirPath: string) => {
   }
 };
 
-export const runAsync = (command: string, label: string): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    const [cmd, ...args] = command.split(" ");
-    console.log({ cmd, args });
-    const childProcess = spawn(cmd, args, {
-      shell: true,
-    });
+// Windows Python installations expose python; Unix builds use python3.
+export const pythonExecutable =
+  process.platform === "win32" ? "python" : "python3";
 
-    childProcess.stdout.on("data", (data) => {
-      process.stdout.write(`${label} ${data}`);
-    });
+// Preserve Node's overloads for commands whose output must be read immediately.
+export { execFileSync as runSync } from "child_process";
 
-    childProcess.stderr.on("data", (data) => {
-      console.error(`${label} ${data}`);
+/** Runs a command, streaming its output, and rejects on a non-zero exit. */
+export const run = (
+  command: string,
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; label?: string } = {}
+): Promise<void> =>
+  new Promise((resolve, reject) => {
+    console.log(`$ ${[command, ...args].join(" ")}`);
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env ?? process.env,
+      stdio: options.label ? ["inherit", "pipe", "pipe"] : "inherit",
     });
-
-    childProcess.on("close", (code) => {
+    if (options.label) {
+      // Label compiler output as well as headings when several SDKs are built.
+      child.stdout?.on("data", (data) =>
+        process.stdout.write(`${options.label} ${data}`)
+      );
+      child.stderr?.on("data", (data) =>
+        process.stderr.write(`${options.label} ${data}`)
+      );
+    }
+    child.on("error", reject);
+    child.on("close", (code) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`${label} exited with code ${code}`));
+        reject(
+          new Error(`${options.label ?? command} exited with code ${code}`)
+        );
       }
     });
-
-    childProcess.on("error", (error) => {
-      reject(new Error(`${label} ${error.message}`));
-    });
   });
-};
 
 export const mapKeys = <T extends object>(obj: T) =>
   Object.keys(obj) as (keyof T)[];
@@ -66,34 +77,6 @@ export const checkFileExists = (filePath: string) => {
   } else {
     console.log("✅ " + filePath);
   }
-};
-
-export const $ = (command: string) => {
-  try {
-    return execSync(command);
-  } catch (e) {
-    exit(1);
-  }
-};
-
-const serializeCMakeArgs = (args: Record<string, string>) => {
-  return Object.keys(args)
-    .map((key) => `-D${key}=${args[key]}`)
-    .join(" ");
-};
-
-export const build = async (
-  label: string,
-  args: Record<string, string>,
-  debugLabel: string
-) => {
-  console.log(`🔨 Building ${label}`);
-  $(`mkdir -p externals/dawn/out/${label}`);
-  process.chdir(`externals/dawn/out/${label}`);
-  const cmd = `cmake ../.. -G Ninja ${serializeCMakeArgs(args)}`;
-  await runAsync(cmd, debugLabel);
-  await runAsync("ninja", debugLabel);
-  process.chdir("../../../..");
 };
 
 export var copyRecursiveSync = function (src: string, dest: string) {

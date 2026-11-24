@@ -1,9 +1,8 @@
-import { execSync, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 
-import type { AppleArchitecture, AppleSDK } from "./apple-configuration";
-import { appleConfigurations, appleSDKs } from "./apple-configuration";
+import type { AppleArchitecture, AppleSDK } from "./apple-build";
+import { appleConfigurations, appleSDKs } from "./apple-build";
 import {
   androidPlatform,
   OutFolder,
@@ -12,7 +11,8 @@ import {
 } from "./skia-configuration";
 import { applyPatches, listPatches } from "./patches";
 import { validateAppleArchive } from "./apple-binaries-validation";
-import { fileOps } from "./utils";
+import { fileOps, pythonExecutable, run, runSync } from "./utils";
+import { getWindowsBuildEnvironment } from "./windows-build";
 
 // Dawn is built from the checkout Skia pins in its DEPS, so the prebuilt Dawn
 // is exactly the Dawn the Skia binaries were compiled against.
@@ -30,23 +30,30 @@ export const DawnAppleXcframework = path.join(
   `${DawnLib}.xcframework`
 );
 
-/** Library families select Android .so or Apple .a outputs, not individual SDKs. */
-export type DawnOS = "android" | "apple";
+/** Library families select Android .so, Windows .lib, or Apple .a outputs, not individual SDKs. */
+export type DawnOS = "android" | "apple" | "windows";
 
 /** Apple target identity is explicit, independent of its CLI selector spelling. */
 export type DawnTarget = {
   // Directory under libs/dawn/<os>/ that receives the library.
   output: string;
   args: Record<string, string>;
+  // Resolve host tools only when this target is selected for building.
+  setup?: () => {
+    env: NodeJS.ProcessEnv;
+    args: Record<string, string>;
+  };
 } & (
   | { os: "android" }
+  | { os: "windows" }
   | { os: "apple"; sdk: AppleSDK; architecture: AppleArchitecture }
 );
 
 // Monolithic Dawn, as react-native-webgpu has always linked it: one shared
 // library on Android (both react-native-skia and react-native-webgpu load the
-// same copy) and one static library per Apple slice. Vulkan only on Android
-// and Metal only on Apple. OpenGL ES is deliberately left out.
+// same copy), one static library per Windows architecture (D3D12 only), and one
+// static library per Apple slice (Metal only). Vulkan only on Android.
+// OpenGL ES is deliberately left out.
 const commonArgs: Record<string, string> = {
   CMAKE_BUILD_TYPE: "Release",
   BUILD_SHARED_LIBS: "OFF",
@@ -82,6 +89,31 @@ const android = (abi: string): DawnTarget => ({
     DAWN_ENABLE_METAL: "OFF",
     CMAKE_EXE_LINKER_FLAGS: "-llog",
     CMAKE_SHARED_LINKER_FLAGS: "-llog -Wl,-z,max-page-size=16384",
+  },
+});
+
+const windows = (architecture: "x64" | "arm64"): DawnTarget => ({
+  os: "windows",
+  output: architecture,
+  args: {
+    ...commonArgs,
+    CMAKE_SYSTEM_NAME: "Windows",
+    CMAKE_SYSTEM_PROCESSOR: architecture === "arm64" ? "ARM64" : "AMD64",
+    DAWN_BUILD_MONOLITHIC_LIBRARY: "STATIC",
+    DAWN_ENABLE_D3D12: "ON",
+    DAWN_ENABLE_D3D11: "OFF",
+    DAWN_ENABLE_VULKAN: "OFF",
+    DAWN_FORCE_SYSTEM_COMPONENT_LOAD: "ON",
+  },
+  setup: () => {
+    const { env, compiler } = getWindowsBuildEnvironment(architecture);
+    return {
+      env,
+      args: {
+        CMAKE_C_COMPILER: compiler,
+        CMAKE_CXX_COMPILER: compiler,
+      },
+    };
   },
 });
 
@@ -130,6 +162,8 @@ export const dawnTargets: Record<string, DawnTarget> = {
   "android-arm64-v8a": android("arm64-v8a"),
   "android-x86": android("x86"),
   "android-x86_64": android("x86_64"),
+  "windows-x64": windows("x64"),
+  "windows-arm64": windows("arm64"),
   ...Object.fromEntries(
     appleSDKs.flatMap((sdk) =>
       appleConfigurations[sdk].architectures.map((architecture) => [
@@ -142,54 +176,27 @@ export const dawnTargets: Record<string, DawnTarget> = {
 
 export const dawnTargetNames = Object.keys(dawnTargets);
 
-export const dawnLibraryName = (os: DawnOS) =>
-  `${DawnLib}.${os === "android" ? "so" : "a"}`;
+export const dawnLibraryName = (os: DawnOS) => {
+  if (os === "android") {
+    return `${DawnLib}.so`;
+  }
+  if (os === "windows") {
+    return "webgpu_dawn.lib";
+  }
+  return `${DawnLib}.a`;
+};
 
 export const dawnTargetOutputDir = (name: string) => {
   const target = dawnTargets[name];
   return path.join(DawnLibs, target.os, target.output);
 };
 
-/** Runs a command, streaming its output, and rejects on a non-zero exit. */
-export const run = (
-  command: string,
-  args: string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; label?: string } = {}
-): Promise<void> =>
-  new Promise((resolve, reject) => {
-    console.log(`$ ${[command, ...args].join(" ")}`);
-    const child = spawn(command, args, {
-      cwd: options.cwd,
-      env: options.env ?? process.env,
-      stdio: options.label ? ["inherit", "pipe", "pipe"] : "inherit",
-    });
-    if (options.label) {
-      // Label compiler output as well as headings when several SDKs are built.
-      child.stdout?.on("data", (data) =>
-        process.stdout.write(`${options.label} ${data}`)
-      );
-      child.stderr?.on("data", (data) =>
-        process.stderr.write(`${options.label} ${data}`)
-      );
-    }
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(
-          new Error(`${options.label ?? command} exited with code ${code}`)
-        );
-      }
-    });
-  });
-
 /**
  * Checks out Dawn and its dependencies at the commits Skia's DEPS pins
  * (see sync-dawn-deps.py).
  */
 export const syncDawnDeps = () =>
-  run("python3", [path.join(__dirname, "sync-dawn-deps.py"), SkiaSrc]);
+  run(pythonExecutable, [path.join(__dirname, "sync-dawn-deps.py"), SkiaSrc]);
 
 /**
  * Applies the patches in scripts/dawn-patches to the Dawn checkout. Each one
@@ -205,12 +212,16 @@ export const applyDawnPatches = () => applyPatches(DawnSrc, DawnPatches);
  * optional components Skia leaves out.
  */
 const skiaThirdPartyLocations = (): string[] =>
-  execSync(
-    `python3 -c "import sys; sys.path.insert(0, 'third_party/dawn'); from cmake_utils import get_third_party_locations; print('\\n'.join(get_third_party_locations()))"`,
+  runSync(
+    pythonExecutable,
+    [
+      "-c",
+      "import sys; sys.path.insert(0, 'third_party/dawn'); from cmake_utils import get_third_party_locations; print(chr(10).join(get_third_party_locations()))",
+    ],
     { cwd: SkiaSrc, encoding: "utf8" }
   )
     .split("\n")
-    .map((line) => line.trim())
+    .map((line) => line.trim().replace(/\\/g, "/"))
     .filter((line) => line.startsWith("-D"));
 
 const ndkBin = () => {
@@ -226,8 +237,9 @@ const ndkBin = () => {
 // Exceptions from the libraries that link Dawn reach JS through Hermes, which
 // only matches them against the app's libc++_shared.so.
 const assertSharedCxxRuntime = (libPath: string) => {
-  const runtimeSymbols = execSync(
-    `${ndkBin()}/llvm-nm -D --defined-only ${libPath}`,
+  const runtimeSymbols = runSync(
+    path.join(ndkBin(), "llvm-nm"),
+    ["-D", "--defined-only", libPath],
     { maxBuffer: Infinity }
   )
     .toString()
@@ -248,23 +260,34 @@ export const buildDawnTarget = async (name: string) => {
   if (target.os === "android" && !process.env.ANDROID_NDK) {
     throw new Error(`ANDROID_NDK must be set to build ${name}`);
   }
+  const setup = target.setup?.();
   const buildDir = path.join(DawnOut, name);
   fs.mkdirSync(buildDir, { recursive: true });
 
   const defines = [
-    ...Object.entries(target.args).map(([key, value]) => `-D${key}=${value}`),
+    ...Object.entries({ ...target.args, ...setup?.args }).map(
+      ([key, value]) => `-D${key}=${value}`
+    ),
     ...skiaThirdPartyLocations(),
   ];
-  // Match Skia's platform labels for both Apple SDKs and Android ABIs.
-  const label = target.os === "android" ? `🤖 ${target.output}` : `🍏 ${name}`;
+  // Match Skia's platform labels for Apple SDKs, Android ABIs, and Windows architectures.
+  let label = `🍏 ${name}`;
+  if (target.os === "android") {
+    label = `🤖 ${target.output}`;
+  } else if (target.os === "windows") {
+    label = `🪟 ${target.output}`;
+  }
   console.log(`🔨 Configuring Dawn for ${name}`);
   await run(
     "cmake",
     ["-S", DawnSrc, "-B", buildDir, "-G", "Ninja", ...defines],
-    { label }
+    { label, env: setup?.env }
   );
   console.log(`🔨 Building Dawn for ${name}`);
-  await run("ninja", ["-C", buildDir, "webgpu_dawn"], { label });
+  await run("ninja", ["-C", buildDir, "webgpu_dawn"], {
+    label,
+    env: setup?.env,
+  });
 
   const libName = dawnLibraryName(target.os);
   const built = path.join(buildDir, "src", "dawn", "native", libName);
@@ -282,7 +305,7 @@ export const buildDawnTarget = async (name: string) => {
   fs.copyFileSync(built, lib);
   if (target.os === "android") {
     console.log(`🤖 Stripping ${lib}`);
-    execSync(`${ndkBin()}/llvm-strip ${lib}`);
+    runSync(path.join(ndkBin(), "llvm-strip"), [lib]);
     assertSharedCxxRuntime(lib);
   }
   console.log(`✅ ${lib}`);
@@ -331,14 +354,14 @@ export const collectDawnHeaders = (buildDir: string) => {
     path.join(DawnSrc, "LICENSE"),
     path.join(DawnLibs, "LICENSE")
   );
-  const git = (args: string) =>
-    execSync(`git ${args}`, { cwd: DawnSrc, encoding: "utf8" }).trim();
+  const git = (args: string[]) =>
+    runSync("git", args, { cwd: DawnSrc, encoding: "utf8" }).trim();
   fs.writeFileSync(
     path.join(DawnLibs, "metadata.json"),
     JSON.stringify(
       {
-        commit: git("rev-parse HEAD"),
-        repository: git("remote get-url origin"),
+        commit: git(["rev-parse", "HEAD"]),
+        repository: git(["remote", "get-url", "origin"]),
         patches: listPatches(DawnPatches),
       },
       null,

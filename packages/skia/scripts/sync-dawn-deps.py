@@ -60,6 +60,13 @@ def main(argv):
     f.write("}\n")
 
   env = dict(os.environ, GIT_SYNC_DEPS_PATH=reduced, GIT_SYNC_DEPS_SKIP_EMSDK="1")
+  if os.name == "nt":
+    # Pass long-path support to clones, fetches and checkouts without changing
+    # the user's global Git configuration. Preserve existing command config.
+    count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
+    env[f"GIT_CONFIG_KEY_{count}"] = "core.longpaths"
+    env[f"GIT_CONFIG_VALUE_{count}"] = "true"
   try:
     subprocess.check_call(
         [sys.executable, os.path.join(skia, "tools", "git-sync-deps")], env=env)

@@ -14,7 +14,6 @@
  * The archives are not a module: a consumer compiles its bindings against the
  * headers and links both into a .wasm with the same Emscripten version.
  */
-import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
 
@@ -30,7 +29,7 @@ import {
   wasmOutputNames,
 } from "./skia-configuration";
 import { listPatches } from "./patches";
-import { fileOps } from "./utils";
+import { fileOps, pythonExecutable, runSync } from "./utils";
 
 // Skia pins emsdk in its DEPS and the Emscripten release in bin/activate-emsdk.
 // Building with that pair keeps Skia on the toolchain upstream compiles it with.
@@ -41,7 +40,7 @@ const DawnSrc = path.join(SkiaSrc, "third_party", "externals", "dawn");
 const SkiaExternals = path.join(SkiaSrc, "third_party", "externals");
 
 const python = (args: string[], cwd: string) =>
-  execFileSync("python3", args, {
+  runSync(pythonExecutable, args, {
     cwd,
     stdio: ["ignore", "inherit", "inherit"],
   });
@@ -52,7 +51,8 @@ const python = (args: string[], cwd: string) =>
  */
 export const activateEmsdk = () => {
   python([path.join(SkiaSrc, "bin", "activate-emsdk")], SkiaSrc);
-  if (!fs.existsSync(path.join(EmscriptenDir, "em++"))) {
+  const compiler = process.platform === "win32" ? "em++.bat" : "em++";
+  if (!fs.existsSync(path.join(EmscriptenDir, compiler))) {
     throw new Error(
       `No Emscripten in ${EmscriptenDir}: bin/activate-emsdk does not install it on this host.`
     );
@@ -198,26 +198,48 @@ export const wasmArchiveSource = (library: string) =>
   path.join(skiaBuildDir("wasm", "wasm32"), library.replace(/\.a$/, ".wasm.a"));
 
 const git = (cwd: string, args: string[]) =>
-  execFileSync("git", args, { cwd }).toString().trim();
+  runSync("git", args, { cwd }).toString().trim();
 
 /** The defines GN gives to a target that depends on Skia and its modules. */
 const consumerDefines = () => {
   const out = skiaBuildDir("wasm", "wasm32");
   const defines = new Set<string>();
+  const gn = path.join(
+    SkiaSrc,
+    "bin",
+    process.platform === "win32" ? "gn.exe" : "gn"
+  );
+  const pathKey =
+    Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ??
+    "PATH";
   for (const target of [
     "//modules/svg:svg",
     "//modules/skottie:skottie",
     "//modules/skparagraph:skparagraph",
   ]) {
     const description = JSON.parse(
-      execFileSync("gn", ["desc", out, target, "defines", "--format=json"], {
-        cwd: SkiaSrc,
-        env: {
-          ...process.env,
-          PATH: `${path.join(SkiaSrc, "..", "depot_tools")}:${process.env.PATH}`,
-        },
-        // gn prints its warnings about unused args on stdout before the JSON.
-      })
+      runSync(
+        gn,
+        [
+          "desc",
+          out,
+          target,
+          "defines",
+          "--format=json",
+          `--script-executable=${pythonExecutable}`,
+        ],
+        {
+          cwd: SkiaSrc,
+          env: {
+            ...process.env,
+            [pathKey]: [
+              path.join(SkiaSrc, "..", "depot_tools"),
+              process.env[pathKey] ?? "",
+            ].join(path.delimiter),
+          },
+          // gn prints its warnings about unused args on stdout before the JSON.
+        }
+      )
         .toString()
         .replace(/^[^{]*/, "")
     ) as Record<string, { defines?: string[] }>;

@@ -6,7 +6,7 @@
 
 import fs from "fs";
 
-import type { AppleArchitecture, AppleSDK } from "./apple-configuration";
+import type { AppleArchitecture, AppleSDK } from "./apple-build";
 
 // LC_BUILD_VERSION platform identifiers from mach-o/loader.h.
 const platforms = {

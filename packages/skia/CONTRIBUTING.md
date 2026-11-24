@@ -47,6 +47,8 @@ The binary packages are built and published by the **Build and publish binaries*
 - Build the Skia libraries: `yarn build-skia` (this can take a while). Header preparation errors fail before dependency sync or compilation.
 - Copy Skia headers: `yarn copy-skia-headers`
 
+Without target arguments, both builders select native targets supported by the current host: Android + Apple on macOS, Android + Windows on Windows, and Android on Linux. `yarn build-skia` also includes wasm on these hosts; `yarn build-dawn` has no wasm target because browsers implement WebGPU. Android still requires the SDK/NDK setup below. Explicit requests for unsupported targets fail before dependency sync or build preparation.
+
 #### Android
 
 Before building, set `$ANDROID_NDK` and `$ANDROID_HOME` to your NDK and Android SDK directories.
@@ -64,6 +66,8 @@ Skia writes `.a` libraries to `libs/android/<abi>`. Dawn writes `libwebgpu_dawn.
 
 Skia writes `.a` libraries to `libs/wasm/lib`, next to the headers (`skia/`), the WebGPU package (`emdawnwebgpu/`) and `metadata.json`, which records the Emscripten version, flags and defines a consumer has to match. These archives are not a module: the [skia-wasm](https://github.com/wcandillon/skia-wasm) repository links them into one. `yarn package-skia-wasm` zips them. The Build and release Skia wasm workflow (`.github/workflows/build-skia-wasm.yml`) does both and publishes the archive as the GitHub release `skia-wasm-<version>`, which skia-wasm pins.
 
+Windows uses `python` and the Emscripten batch launchers. The pinned Emsdk release falls back to x64 tools on Windows on Arm; native Windows libraries still use native ARM64 MSVC tools. Packaging with `yarn package-skia-wasm` requires `zip` on `PATH`.
+
 #### Apple
 
 Both Apple builders accept SDK groups (`iphoneos`, `iphonesimulator`, `maccatalyst`, `appletvos`, `appletvsimulator`, `macos`) and individual targets such as `iphonesimulator-arm64` or `iphonesimulator-x86_64`. A group builds its configured architectures and produces lipo'd universal libraries when it has multiple architectures; a single target keeps only that architecture. Single-architecture SDKs copy their libraries directly.
@@ -71,6 +75,18 @@ Both Apple builders accept SDK groups (`iphoneos`, `iphonesimulator`, `maccataly
 Skia stages per-architecture archives in `libs/apple/<sdk>-<arch>` and writes assembled libraries plus `metadata.json` to `libs/apple/<sdk>`, including for single-architecture builds. After successful SDK assembly, its consumed staging directories are removed. Dawn uses the same layout under `libs/dawn/apple`. GN/CMake build directories remain available for incremental builds. Neither builder assembles XCFrameworks. `package-binaries` still creates the existing Apple npm XCFrameworks for compatibility; the CocoaPods/SwiftPM consumers have not migrated to the raw SDK archives yet.
 
 After each Apple target compiles, both builders verify every Mach-O object's platform and architecture in its `.a` libraries before copying them or starting the next target. Each check expects only that target's architecture. The check reads archive headers and load commands directly, without extracting objects or running a tool per object.
+
+#### Windows
+
+Requires Git, Python 3.9+ (`python`), CMake, and Ninja on `PATH`, plus Visual Studio C++ build tools and a Windows SDK. Separate CMake and Ninja installations work. ARM64 Python avoids emulation during code generation on Windows on Arm.
+
+> In **Visual Studio Installer**, choose **Modify**, then **Desktop development with C++**. Under **Individual components**, select **MSVC x64/x86 build tools**, **MSVC ARM64 build tools**, and a **Windows SDK**.
+
+Both builders accept `windows` to build both `x64` and `ARM64`. It locates Visual Studio through `vswhere.exe` and initialize a separate compiler environment per target. The terminal environment stays unchanged. Native ARM64 host tools are selected on Windows on Arm, including when producing x64 libraries.
+
+Windows scripts use `python`; other hosts use `python3`. Dependency sync enables Git long paths for that process. Patch input is normalized to LF. Skia outputs are `libs/windows/<arch>/*.lib`; Dawn outputs are `libs/dawn/windows/<arch>/webgpu_dawn.lib`.
+
+Ninja can pause its visible counter while its nested Dawn/Tint builds continue: output from those actions is buffered until completion. Their progress is recorded in `externals/skia/out/windows/<arch>/cmake_dawn/.ninja_log` and `cmake_tint/.ninja_log`.
 
 ### Upgrading Skia
 
@@ -93,14 +109,21 @@ Upgrading to a new Skia milestone (for example `chrome/m147` to `chrome/m150`) i
 Make sure `$ANDROID_NDK` and `$ANDROID_HOME` are set (see [Building](#building)).
 
 1. Bootstrap depot_tools once (otherwise `gn gen` fails with `python3_bin_reldir.txt not found`):
-   ```sh
-   cd externals/depot_tools && ./update_depot_tools && cd ../..
-   ```
+   - macOS / Linux:
+     ```sh
+     cd externals/depot_tools && ./update_depot_tools && cd ../..
+     ```
+   - Windows (PowerShell):
+     ```powershell
+     Push-Location .\externals\depot_tools
+     .\update_depot_tools.bat
+     Pop-Location
+     ```
 2. Clean and build from `packages/skia`:
    ```sh
    cd packages/skia
    yarn clean-skia
-   yarn build-skia          # all platforms, or scope it: yarn build-skia iphoneos android
+   yarn build-skia          # host-supported targets, or scope it: yarn build-skia iphoneos android
                             # or a single target: yarn build-skia iphonesimulator-arm64
    yarn copy-skia-headers   # build-skia also runs this at the end
    ```

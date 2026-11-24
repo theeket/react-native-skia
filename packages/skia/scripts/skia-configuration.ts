@@ -1,11 +1,11 @@
 import fs from "fs";
 import path from "path";
 
-import type { AppleArchitecture, AppleSDK } from "./apple-configuration";
-import { appleConfigurations, appleSDKs } from "./apple-configuration";
+import type { AppleArchitecture, AppleSDK } from "./apple-build";
+import { appleConfigurations, appleSDKs } from "./apple-build";
 import { applyPatches } from "./patches";
 import { prepareDawnHeaders } from "./prepare-dawn-headers";
-import { $, fileOps } from "./utils";
+import { fileOps } from "./utils";
 
 const DEBUG = false;
 const BUILD_WITH_PARAGRAPH = true;
@@ -37,6 +37,7 @@ const NoParagraphArgs = [
 
 // To build the paragraph API:
 // On Android: we use system ICU
+// On Windows: we use Skia's built-in ICU
 // On Apple: we use libgrapheme
 const CommonParagraphArgs = [
   ["skia_enable_skparagraph", true],
@@ -50,6 +51,10 @@ const ParagraphArgsAndroid = BUILD_WITH_PARAGRAPH
       ["skia_use_icu", true],
       ["skia_use_runtime_icu", true],
     ]
+  : NoParagraphArgs;
+
+const ParagraphArgsWindows = BUILD_WITH_PARAGRAPH
+  ? [...CommonParagraphArgs, ["skia_use_icu", true]]
   : NoParagraphArgs;
 
 const ParagraphArgsApple = BUILD_WITH_PARAGRAPH
@@ -67,6 +72,10 @@ const ParagraphApple = BUILD_WITH_PARAGRAPH
 
 const ParagraphOutputsAndroid = BUILD_WITH_PARAGRAPH
   ? ["libskparagraph.a", "libskunicode_core.a", "libskunicode_icu.a"]
+  : [];
+
+const ParagraphOutputsWindows = BUILD_WITH_PARAGRAPH
+  ? ["skparagraph.lib", "skunicode_core.lib", "skunicode_icu.lib"]
   : [];
 
 // Dawn is not taken from the GN build: skia_use_dawn makes it build Dawn's
@@ -101,9 +110,9 @@ export const commonArgs = [
   ["skia_use_partition_alloc", false],
 ];
 
-// Build groups identify Android, wasm or one Apple SDK, independently of library
-// format. GN keeps its own CPU/platform spellings.
-export type PlatformName = "android" | "wasm" | AppleSDK;
+// Build groups identify Android, Windows, wasm, or one Apple SDK.
+// GN keeps its own CPU/platform spellings.
+export type PlatformName = "android" | "windows" | "wasm" | AppleSDK;
 
 type Arg = (string | boolean | number)[];
 export type Target = {
@@ -113,7 +122,7 @@ export type Target = {
   options?: Arg[];
 };
 
-type AndroidTarget = Target & {
+type OutputTarget = Target & {
   output: string;
 };
 
@@ -205,7 +214,8 @@ export const wasmOutputNames = [
 ];
 
 export const configurations: {
-  android: Platform<AndroidTarget>;
+  android: Platform<OutputTarget>;
+  windows: Platform<OutputTarget>;
   wasm: Platform;
 } & Record<AppleSDK, Platform> = {
   android: {
@@ -260,6 +270,38 @@ export const configurations: {
       ...ParagraphOutputsAndroid,
     ],
   },
+  windows: {
+    targets: {
+      x64: {
+        platform: "win",
+        cpu: "x64",
+        output: "x64",
+      },
+      arm64: {
+        platform: "win",
+        cpu: "arm64",
+        output: "arm64",
+      },
+    },
+    args: [
+      ["skia_use_gl", false],
+      // Link against the dynamic Universal CRT (/MD) and enable C++ exceptions
+      // (/EHsc) and RTTI (/GR) to match React Native for Windows (RNSkia.vcxproj).
+      ["extra_cflags", `["/MD", "-DSKIA_C_DLL"]`],
+      ["extra_cflags_cc", `["/MD", "/EHsc", "/GR"]`],
+      ...ParagraphArgsWindows,
+    ],
+    outputRoot: "libs/windows",
+    outputNames: [
+      "skia.lib",
+      "skshaper.lib",
+      "svg.lib",
+      "skottie.lib",
+      "sksg.lib",
+      "jsonreader.lib",
+      ...ParagraphOutputsWindows,
+    ],
+  },
   // Graphite on the browser's WebGPU. Built with Emscripten from the emsdk
   // Skia pins; see wasm-configuration.ts for the toolchain and for what a
   // consumer of these archives has to match.
@@ -275,7 +317,7 @@ export const configurations: {
       ["skia_enable_ganesh", false],
       ["skia_use_webgl", false],
       // The browser implements WebGPU: Dawn is neither built nor linked.
-      ["skia_emdawnwebgpu_dir", `"${EmdawnwebgpuDir}"`],
+      ["skia_emdawnwebgpu_dir", `"${EmdawnwebgpuDir.replace(/\\/g, "/")}"`],
       // A module with threads needs a shared memory, which browsers only give
       // to cross-origin isolated pages.
       ["skia_wasm_enable_pthreads", false],
@@ -295,7 +337,7 @@ export const configurations: {
   >),
 };
 
-/** Per-architecture build selectors for SDK groups and Android CPU targets. */
+/** Per-architecture build selectors for SDK groups, Android ABIs, and Windows CPU targets. */
 export const skiaTargets = Object.fromEntries(
   Object.entries(configurations).flatMap(([platform, configuration]) =>
     Object.keys(configuration.targets).map((architecture) => [
@@ -307,7 +349,7 @@ export const skiaTargets = Object.fromEntries(
 
 /** GN intermediates are separate from the SDK libraries uploaded by CI. */
 export const skiaBuildDir = (platform: PlatformName, architecture: string) =>
-  platform === "android" || platform === "wasm"
+  platform === "android" || platform === "windows" || platform === "wasm"
     ? path.join(OutFolder, platform, architecture)
     : path.join(OutFolder, "apple", `${platform}-${architecture}`);
 
@@ -316,14 +358,15 @@ export const skiaTargetOutputDir = (name: string) => {
   if (platform === "wasm") {
     return path.join(WasmLibs, "lib");
   }
-  return platform === "android"
-    ? path.join(
-        PackageRoot,
-        "libs",
-        "android",
-        configurations.android.targets[architecture].output
-      )
-    : path.join(PackageRoot, "libs", "apple", name);
+  if (platform === "android" || platform === "windows") {
+    return path.join(
+      PackageRoot,
+      "libs",
+      platform,
+      configurations[platform].targets[architecture].output
+    );
+  }
+  return path.join(PackageRoot, "libs", "apple", name);
 };
 
 const copyModule = (module: string) => {
@@ -522,30 +565,35 @@ export const copyHeaders = async () => {
     // Recorder.h since m157) and include/gpu/graphite/Recorder.h.
     "Recorder.h",
   ];
-  const duplicateHeaders = $(
-    "find ./cpp -name '*.h' -type f | sed 's/.*\\///' | sort | uniq -d"
-  )
-    .toString()
-    .split("\n")
-    .filter((name: string) => name && !knownDuplicateHeaders.includes(name))
-    .join("\n");
-  if (duplicateHeaders.trim()) {
+  // Scan with Node so this validation also works without Unix command-line tools.
+  const headerPaths = new Map<string, string[]>();
+  const collectHeaders = (directory: string) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const filePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        collectHeaders(filePath);
+      } else if (entry.isFile() && entry.name.endsWith(".h")) {
+        const paths = headerPaths.get(entry.name) ?? [];
+        paths.push(filePath);
+        headerPaths.set(entry.name, paths);
+      }
+    }
+  };
+  collectHeaders("./cpp");
+  const duplicateHeaders = [...headerPaths.entries()]
+    .filter(
+      ([name, paths]) =>
+        paths.length > 1 && !knownDuplicateHeaders.includes(name)
+    )
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (duplicateHeaders.length > 0) {
     console.warn("⚠️  WARNING: Found duplicate header names:");
-    duplicateHeaders
-      .split("\n")
-      .filter(Boolean)
-      .forEach((filename: string) => {
-        const fullPaths = $(
-          `find ./cpp -name "${filename}" -type f`
-        ).toString();
-        console.warn(`   ${filename}:`);
-        fullPaths
-          .split("\n")
-          .filter(Boolean)
-          .forEach((filePath: string) => {
-            console.warn(`     ${filePath}`);
-          });
-      });
+    for (const [filename, fullPaths] of duplicateHeaders) {
+      console.warn(`   ${filename}:`);
+      for (const filePath of fullPaths) {
+        console.warn(`     ${filePath}`);
+      }
+    }
     console.error(
       "❌ ERROR: Duplicate headers found that will cause iOS build conflicts!"
     );

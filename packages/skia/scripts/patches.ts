@@ -1,6 +1,7 @@
-import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
+
+import { runSync } from "./utils";
 
 /**
  * Sorted patch filenames in a directory. The build applies and the metadata
@@ -33,7 +34,10 @@ export const applyPatches = (
   const patches = listPatches(patchesDir);
 
   for (const name of patches) {
-    let patch = fs.readFileSync(path.join(patchesDir, name), "utf-8");
+    let patch = fs
+      .readFileSync(path.join(patchesDir, name), "utf-8")
+      // Windows checkouts may convert patch context lines to CRLF.
+      .replace(/\r\n/g, "\n");
     if (copiedFilesOnly) {
       // A patch can touch headers, implementation files, and build rules.
       // Keep complete file sections only for paths present in the header copy.
@@ -50,7 +54,7 @@ export const applyPatches = (
     }
 
     const gitApply = (args: string[]) =>
-      execFileSync("git", ["apply", ...args], {
+      runSync("git", ["apply", ...args], {
         cwd: sourceDir,
         // Send patches on stdin; no temporary patch file or shell quoting needed.
         input: patch,

@@ -10,11 +10,11 @@
  * Usage:
  *   yarn package-skia-wasm [--output=<dir>]     (default: build/wasm)
  */
-import { execFileSync } from "child_process";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 
+import { runSync } from "./utils";
 import { PackageRoot, WasmLibs } from "./skia-configuration";
 
 const AssetName = "skia-graphite-wasm.zip";
@@ -40,7 +40,7 @@ const archive = path.resolve(output, AssetName);
 fs.mkdirSync(path.dirname(archive), { recursive: true });
 // zip adds to an archive that exists already.
 fs.rmSync(archive, { force: true });
-execFileSync(
+runSync(
   "zip",
   // -X: no uid/gid nor extended timestamps; -y: a symlink stays a symlink.
   ["-q", "-r", "-X", "-y", archive, ...Entries, "-x", "*.DS_Store"],

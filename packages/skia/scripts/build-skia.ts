@@ -1,13 +1,12 @@
-import { execSync } from "child_process";
 import { exit } from "process";
 import fs from "fs";
 import path from "path";
 
 import type { Platform, PlatformName } from "./skia-configuration";
-import type { AppleArchitecture } from "./apple-configuration";
+import type { AppleArchitecture } from "./apple-build";
 import { combineAppleLibraries } from "./apple-build";
 import { validateAppleArchive } from "./apple-binaries-validation";
-import { selectBuildTargets } from "./apple-configuration";
+import { selectBuildTargets } from "./build-targets";
 import { prepareDawnHeaders } from "./prepare-dawn-headers";
 import {
   applySkiaPatches,
@@ -30,7 +29,28 @@ import {
   wasmArchiveSource,
   writeWasmMetadata,
 } from "./wasm-configuration";
-import { $, fileOps, runAsync } from "./utils";
+import { fileOps, pythonExecutable, run, runSync } from "./utils";
+import { getWindowsBuildEnvironment } from "./windows-build";
+
+const pathKey =
+  Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ??
+  "PATH";
+const buildEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_SYNC_DEPS_SKIP_EMSDK: "1",
+  [pathKey]: [
+    path.join(ProjectRoot, "externals", "depot_tools"),
+    path.join(ProjectRoot, "externals", "bin"),
+    process.env[pathKey] ?? "",
+  ].join(path.delimiter),
+};
+if (process.platform === "win32") {
+  // Apply long-path support to Git processes launched by dependency sync.
+  const count = Number(buildEnv.GIT_CONFIG_COUNT ?? "0");
+  buildEnv.GIT_CONFIG_COUNT = String(count + 1);
+  buildEnv[`GIT_CONFIG_KEY_${count}`] = "core.longpaths";
+  buildEnv[`GIT_CONFIG_VALUE_${count}`] = "true";
+}
 
 /**
  * Locate GN intermediates, separately from distributable libraries under libs/.
@@ -42,12 +62,13 @@ const getOutDir = (platform: PlatformName, targetName: string) => {
 /**
  * Generate one architecture's Ninja files with common, platform, and target GN args.
  * Runs from the Skia source directory; an unknown target terminates the script.
+ * Return the resolved compiler environment for the build step.
  */
 const configurePlatform = async (
   platformName: PlatformName,
   configuration: Platform,
   targetName: string
-) => {
+): Promise<NodeJS.ProcessEnv> => {
   process.chdir(SkiaSrc);
   console.log(
     `Configuring platform "${platformName}" for target "${targetName}"`
@@ -63,10 +84,16 @@ const configurePlatform = async (
       exit(1);
     }
 
-    const commandline = `PATH=../depot_tools/:$PATH gn gen ${getOutDir(
-      platformName,
-      targetName
-    )}`;
+    const windows =
+      platformName === "windows"
+        ? getWindowsBuildEnvironment(target.cpu, buildEnv)
+        : undefined;
+    const env = windows?.env ?? buildEnv;
+    const gn = path.join(
+      SkiaSrc,
+      "bin",
+      process.platform === "win32" ? "gn.exe" : "gn"
+    );
 
     const args = configuration.args.reduce(
       (a, cur) => (a += `${cur[0]}=${cur[1]} \n`),
@@ -83,23 +110,30 @@ const configurePlatform = async (
       "";
 
     const options =
-      configuration.options?.reduce(
-        (a, cur) => (a += `--${cur[0]}=${cur[1]} `),
-        ""
-      ) || "";
+      configuration.options?.map(([key, value]) => `--${key}=${value}`) ?? [];
 
     const targetOptions =
-      target.options?.reduce((a, cur) => (a += `--${cur[0]}=${cur[1]} `), "") ||
-      "";
+      target.options?.map(([key, value]) => `--${key}=${value}`) ?? [];
 
-    const command = `${commandline} ${options} ${targetOptions} --script-executable=python3 --args='target_os="${target.platform}" target_cpu="${target.cpu}" ${common}${args}${targetArgs}'`;
-    await runAsync(command, "⚙️");
-    return true;
-  } else {
-    console.log(
-      `Could not find platform "${platformName}" for target "${targetName}" `
+    await run(
+      gn,
+      [
+        "gen",
+        getOutDir(platformName, targetName),
+        ...options,
+        ...targetOptions,
+        `--script-executable=${pythonExecutable}`,
+        `--args=target_os="${target.platform}" target_cpu="${
+          target.cpu
+        }" ${common}${args}${targetArgs} ${windows?.gnArgs ?? ""}`,
+      ],
+      { env, label: "⚙️" }
     );
-    return false;
+    return env;
+  } else {
+    throw new Error(
+      `Could not find platform "${platformName}" for target "${targetName}"`
+    );
   }
 };
 
@@ -109,34 +143,35 @@ const configurePlatform = async (
  */
 export const buildPlatform = async (
   platform: PlatformName,
-  targetName: string
+  targetName: string,
+  env: NodeJS.ProcessEnv = buildEnv
 ) => {
   process.chdir(SkiaSrc);
   console.log(`Building platform "${platform}" for target "${targetName}"`);
   // We need to include the path to our custom python2 -> python3 mapping script
   // to make sure we can run all scripts that uses #!/usr/bin/env python as shebang
   // https://groups.google.com/g/skia-discuss/c/BYyB-TwA8ow
-  // wasm builds its archives by name: the default target would also compile
-  // the Dawn and Tint that the emdawnwebgpu package replaces.
+  // Build only wasm archives: the default target also builds native Dawn/Tint.
   const ninjaTargets =
     platform === "wasm"
-      ? configurations.wasm.outputNames
-          .map((library) => ` ${path.basename(wasmArchiveSource(library))}`)
-          .join("")
-      : "";
-  const command = `PATH=${process.cwd()}/../bin:$PATH ninja -C ${getOutDir(
-    platform,
-    targetName
-  )}${ninjaTargets}`;
+      ? configurations.wasm.outputNames.map((library) =>
+          path.basename(wasmArchiveSource(library))
+        )
+      : [];
   // Apple CPU names overlap across SDKs; identify both in compiler output.
   let label = `🍏 ${platform}-${targetName}`;
   if (platform === "android") {
     label = `🤖 ${targetName}`;
+  } else if (platform === "windows") {
+    label = `🪟 ${targetName}`;
   } else if (platform === "wasm") {
     label = `🕸️ ${targetName}`;
   }
-  await runAsync(command, label);
-  if (platform !== "android" && platform !== "wasm") {
+  await run("ninja", ["-C", getOutDir(platform, targetName), ...ninjaTargets], {
+    env,
+    label,
+  });
+  if (platform !== "android" && platform !== "windows" && platform !== "wasm") {
     // Fail this target before staging or compiling the next architecture.
     for (const library of configurations[platform].outputNames) {
       validateAppleArchive(
@@ -155,9 +190,10 @@ export const buildPlatform = async (
  * instead of libc++_shared's, breaking exception matching across libraries.
  */
 const assertNoRuntimeTypeinfo = (libPath: string) => {
-  const copies = execSync(
+  const copies = runSync(
     `$ANDROID_NDK/toolchains/llvm/prebuilt/*/bin/llvm-nm --defined-only --just-symbol-name ${libPath}`,
-    { maxBuffer: Infinity }
+    [],
+    { shell: true, maxBuffer: Infinity }
   )
     .toString()
     .split("\n")
@@ -179,21 +215,22 @@ export const copyLib = (
   platform: string,
   outputNames: string[]
 ) => {
-  const dstPath = `${PackageRoot}/libs/${os}/${platform}/`;
-  $(`mkdir -p ${dstPath}`);
+  const dstPath = path.join(PackageRoot, "libs", os, platform);
+  fs.mkdirSync(dstPath, { recursive: true });
 
   outputNames
-    .map((name) => `${getOutDir(os, cpu)}/${name}`)
-    .forEach((lib) => {
-      const libPath = lib;
+    .map((name) => path.join(getOutDir(os, cpu), name))
+    .forEach((libPath) => {
+      const destFile = path.join(dstPath, path.basename(libPath));
       console.log(`Copying ${libPath} to ${dstPath}`);
-      console.log(`cp ${libPath} ${dstPath}`);
-      $(`cp ${libPath} ${dstPath}`);
+      fs.copyFileSync(libPath, destFile);
       if (os === "android") {
         // The archives ship as they are: drop the debug info, which is most
         // of their size.
-        $(
-          `$ANDROID_NDK/toolchains/llvm/prebuilt/*/bin/llvm-strip --strip-debug ${dstPath}/${path.basename(libPath)}`
+        runSync(
+          `$ANDROID_NDK/toolchains/llvm/prebuilt/*/bin/llvm-strip --strip-debug ${destFile}`,
+          [],
+          { shell: true }
         );
       }
     });
@@ -206,9 +243,11 @@ export const copyLib = (
  * selected target sequentially before combining Apple SDK outputs and copying headers.
  *
  * Usage (from packages/skia):
- *   yarn build-skia                              # every target
+ *   yarn build-skia                              # every target supported by this host
  *   yarn build-skia android                      # all Android ABIs
  *   yarn build-skia android-arm64                # one Android architecture
+ *   yarn build-skia windows                      # all Windows architectures
+ *   yarn build-skia windows-x64                  # one Windows architecture
  *   yarn build-skia iphonesimulator              # lipo'd universal simulator libraries
  *   yarn build-skia iphonesimulator-arm64        # one simulator architecture
  *   yarn build-skia iphoneos iphonesimulator     # multiple SDK groups
@@ -218,11 +257,12 @@ export const copyLib = (
  * (e.g. libs/apple/iphonesimulator-arm64/), then assembled under libs/apple/<sdk>/
  * (e.g. libs/apple/iphonesimulator/). Staging directories are removed on successful
  * SDK assembly; GN intermediates remain. Android uses libs/android/<abi>/
- * (e.g. libs/android/arm64-v8a/). package-binaries assembles npm XCFrameworks.
+ * (e.g. libs/android/arm64-v8a/) and Windows uses libs/windows/<arch>/
+ * (e.g. libs/windows/x64/). package-binaries assembles npm XCFrameworks.
  * wasm uses libs/wasm/ with its own headers and emdawnwebgpu package next to
  * the archives; see wasm-configuration.ts.
  *
- * See apple-configuration.ts for SDK groups/architectures and
+ * See apple-build.ts for SDK groups/architectures and
  * skia-configuration.ts (skiaTargets) for the full target list.
  */
 (async () => {
@@ -242,6 +282,12 @@ export const copyLib = (
   const hasAndroid = selectedTargets.some(
     (name) => skiaTargets[name].platform === "android"
   );
+  const hasWindows = selectedTargets.some(
+    (name) => skiaTargets[name].platform === "windows"
+  );
+  const hasWasm = selectedTargets.some(
+    (name) => skiaTargets[name].platform === "wasm"
+  );
   if (hasAndroid) {
     ["ANDROID_NDK", "ANDROID_HOME"].forEach((name) => {
       // Test for existence of Android SDK
@@ -257,28 +303,39 @@ export const copyLib = (
   // Sync dependencies before applying the pinned source patches.
   console.log("Running gclient sync...");
   process.chdir(SkiaSrc);
-  $("PATH=../depot_tools/:$PATH python3 tools/git-sync-deps");
+  const syncEnv = { ...buildEnv };
+  if (hasWasm) {
+    // A truthy skip value prevents git-sync-deps from checking out Emsdk.
+    delete syncEnv.GIT_SYNC_DEPS_SKIP_EMSDK;
+  }
+  await run(pythonExecutable, ["tools/git-sync-deps"], { env: syncEnv });
   console.log("gclient sync done");
   // Start the Skia tree from its pinned commit so leftovers from an earlier
   // build (old patches, string edits, local tweaks) can't make a current
   // patch look stale. This only resets Skia's tracked files: the Dawn
   // checkout under third_party/externals is a separate repository, so its
   // patches are still applied idempotently by applyDawnPatches().
-  $("git reset --hard HEAD");
+  runSync("git", ["reset", "--hard", "HEAD"]);
   // Skia's GN build and the standalone Dawn build share the Dawn checkout.
   applySkiaPatches();
   applyDawnPatches();
 
-  // Clear Android's ABI outputs before staging the selected architectures.
+  // Clear Android and Windows outputs before staging the selected architectures.
   if (hasAndroid) {
-    $(`rm -rf ${PackageRoot}/${configurations.android.outputRoot}`);
+    fs.rmSync(path.join(PackageRoot, configurations.android.outputRoot), {
+      recursive: true,
+      force: true,
+    });
+  }
+  if (hasWindows) {
+    fs.rmSync(path.join(PackageRoot, configurations.windows.outputRoot), {
+      recursive: true,
+      force: true,
+    });
   }
 
   // GN compiles Graphite against the emdawnwebgpu headers, so the package
   // comes first; it needs Emscripten for the struct layouts.
-  const hasWasm = selectedTargets.some(
-    (name) => skiaTargets[name].platform === "wasm"
-  );
   if (hasWasm) {
     fileOps.rm(WasmLibs);
     activateEmsdk();
@@ -288,8 +345,8 @@ export const copyLib = (
   for (const name of selectedTargets) {
     const { platform, architecture } = skiaTargets[name];
     const configuration = configurations[platform];
-    await configurePlatform(platform, configuration, architecture);
-    await buildPlatform(platform, architecture);
+    const env = await configurePlatform(platform, configuration, architecture);
+    await buildPlatform(platform, architecture, env);
     process.chdir(ProjectRoot);
     if (platform === "android") {
       configuration.outputNames.forEach((library) =>
@@ -301,6 +358,13 @@ export const copyLib = (
         platform,
         architecture,
         configurations.android.targets[architecture].output,
+        configuration.outputNames
+      );
+    } else if (platform === "windows") {
+      copyLib(
+        platform,
+        architecture,
+        configurations.windows.targets[architecture].output,
         configuration.outputNames
       );
     } else if (platform === "wasm") {

@@ -1,9 +1,87 @@
-import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
 
-import type { AppleSDK } from "./apple-configuration";
-import { appleConfigurations, appleSDKs } from "./apple-configuration";
+import { runSync } from "./utils";
+
+/** Apple build identities shared by Skia, Dawn, and release packaging. */
+export type AppleSDK =
+  | "iphoneos"
+  | "iphonesimulator"
+  | "maccatalyst"
+  | "appletvos"
+  | "appletvsimulator"
+  | "macos";
+
+export type AppleArchitecture = "arm64" | "x86_64";
+export type ApplePlatform = "ios" | "tvos" | "macos";
+
+export interface AppleConfiguration {
+  /** Binary platform; Catalyst shares iOS while using the macOS SDK. */
+  platform: ApplePlatform;
+  /** SDK name understood by CMake and xcrun, independent of output names. */
+  sysroot: string;
+  systemName: "iOS" | "tvOS" | "Darwin";
+  minimumTarget: string;
+  /** Architectures to build; multiple entries produce lipo'd universal libraries. */
+  architectures: AppleArchitecture[];
+  /** Distinguishes simulator and Catalyst slices from native device slices. */
+  variant?: "simulator" | "maccatalyst";
+}
+
+// Deployment targets belong to the binaries, independently of SwiftPM metadata.
+const iosMinTarget = "15.1";
+const tvosMinTarget = "15.1";
+const macosMinTarget = "14.0";
+
+export const appleConfigurations: Record<AppleSDK, AppleConfiguration> = {
+  iphoneos: {
+    platform: "ios",
+    sysroot: "iphoneos",
+    systemName: "iOS",
+    minimumTarget: iosMinTarget,
+    architectures: ["arm64"],
+  },
+  iphonesimulator: {
+    platform: "ios",
+    sysroot: "iphonesimulator",
+    systemName: "iOS",
+    minimumTarget: iosMinTarget,
+    architectures: ["arm64", "x86_64"],
+    variant: "simulator",
+  },
+  maccatalyst: {
+    platform: "ios",
+    sysroot: "macosx",
+    systemName: "Darwin",
+    minimumTarget: iosMinTarget,
+    architectures: ["arm64", "x86_64"],
+    variant: "maccatalyst",
+  },
+  appletvos: {
+    platform: "tvos",
+    sysroot: "appletvos",
+    systemName: "tvOS",
+    minimumTarget: tvosMinTarget,
+    architectures: ["arm64"],
+  },
+  appletvsimulator: {
+    platform: "tvos",
+    sysroot: "appletvsimulator",
+    systemName: "tvOS",
+    minimumTarget: tvosMinTarget,
+    architectures: ["arm64", "x86_64"],
+    variant: "simulator",
+  },
+  macos: {
+    platform: "macos",
+    sysroot: "macosx",
+    systemName: "Darwin",
+    minimumTarget: macosMinTarget,
+    architectures: ["arm64", "x86_64"],
+  },
+};
+
+export const appleSDKs = Object.keys(appleConfigurations) as AppleSDK[];
 
 /**
  * Lipo architectures of the same SDK into universal <root>/<sdk>/*.a libraries.
@@ -50,7 +128,7 @@ export const combineAppleLibraries = (
       if (inputs.length === 1) {
         fs.copyFileSync(inputs[0], output);
       } else {
-        execFileSync("lipo", ["-create", ...inputs, "-output", output], {
+        runSync("lipo", ["-create", ...inputs, "-output", output], {
           stdio: "inherit",
         });
       }
@@ -134,7 +212,7 @@ export const createAppleXCFramework = (
   fs.rmSync(destination, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   // XCFrameworks separate platforms; lipo combines architectures within one SDK.
-  execFileSync(
+  runSync(
     "xcodebuild",
     [
       "-create-xcframework",
